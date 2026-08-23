@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: scheduler
+      POSTGRES_PASSWORD: scheduler
+      POSTGRES_DB: scheduler
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scheduler"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://scheduler:scheduler@postgres:5432/scheduler
+      DATABASE_URL_SYNC: postgresql+psycopg2://scheduler:scheduler@postgres:5432/scheduler
+      JWT_SECRET: dev-secret-change-me
+      CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
+    ports:
+      - "8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  scheduler:
+    build: ./backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://scheduler:scheduler@postgres:5432/scheduler
+    command: python -m scripts.run_scheduler
+
+  worker-1:
+    build: ./backend
+    depends_on:
+      - api
+    environment:
+      SCHEDULER_API_URL: http://api:8000
+      SCHEDULER_TOKEN: ${SCHEDULER_TOKEN:-}
+    command: python scripts/run_worker.py --name worker-1 --queues emails,reports --concurrency 4
+
+  worker-2:
+    build: ./backend
+    depends_on:
+      - api
+    environment:
+      SCHEDULER_API_URL: http://api:8000
+      SCHEDULER_TOKEN: ${SCHEDULER_TOKEN:-}
+    command: python scripts/run_worker.py --name worker-2 --queues emails --concurrency 4
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - api
+    ports:
+      - "3000:80"
+
+volumes:
+  pg_data:
