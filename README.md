@@ -1,5 +1,18 @@
 # Distributed Job Scheduler
 
+> **🚀 Live Demo & Access Links**
+> * **Frontend Dashboard:** [https://distributed-job-scheduler-rho.vercel.app](https://distributed-job-scheduler-rho.vercel.app/login)
+> * **Backend API (Swagger Docs):** [https://distributed-job-scheduler-api-pltk.onrender.com/docs](https://distributed-job-scheduler-api-pltk.onrender.com/docs)
+> 
+> **Demo Credentials:**
+> * **Email:** `demo@example.com`
+> * **Password:** `password123`
+
+---
+
+A production-inspired distributed job scheduling platform: authenticate, create projects and queues, submit immediate/delayed/scheduled/recurring/batch jobs through a REST API, and watch a fleet of worker processes atomically claim, execute, retry, and dead-letter them — all visible live on a dashboard.
+# Distributed Job Scheduler
+
 A production-inspired distributed job scheduling platform: authenticate, create
 projects and queues, submit immediate/delayed/scheduled/recurring/batch jobs
 through a REST API, and watch a fleet of worker processes atomically claim,
