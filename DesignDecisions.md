@@ -84,6 +84,11 @@ event broadcast by instance B. **Documented upgrade path:** swap
 instance subscribe and forward to its own local connections; the router
 call sites (`await ws_manager.broadcast(...)`) don't need to change.
 
+*Superseded in part by decision #9 below*, which hardens this same
+component with authentication and a replay buffer — the single-instance
+trade-off described here is unchanged by that work and remains the
+relevant limitation to know about before scaling the API horizontally.
+
 ## 5. Retry strategies and where policy lives
 
 **Decision:** `RetryPolicy` is its own table, referenced by `Queue` (as a
@@ -161,3 +166,271 @@ every route handler.
   ingestion)** — the REST submission API already covers "create a job";
   an event-bus trigger is a thin producer in front of the same
   `POST /jobs` contract and doesn't change the scheduler's design.
+
+## 9. WebSocket authentication and event replay (hardening pass)
+
+### Decision
+Require the same JWT every REST endpoint uses on the WebSocket handshake
+(`?token=...` query param, since browser `WebSocket` clients cannot set an
+`Authorization` header), validated *before* `accept()` is called. Wrap
+every broadcast in a structured envelope (`{id, type, ts, data}`) with a
+per-process monotonic id, backed by a bounded 200-event ring buffer that
+a reconnecting client can replay from via `?since=<id>`.
+
+### Context
+The original implementation accepted any WebSocket connection to
+`/api/v1/dashboard/ws` with no authentication at all, while every REST
+endpoint in the system required a valid bearer token. That's not a minor
+inconsistency — it meant job payloads, worker hostnames, and error
+messages were observable by anyone with network access to the API,
+authenticated or not. Separately, events were flat, unordered dicts: a
+client that disconnected for any reason (phone sleep, wifi blip, tab
+backgrounded) had no way to know what it missed and no way to ask for it.
+
+### Alternatives considered
+- **Do nothing / accept the gap as "demo-quality."** Rejected — this is
+  an actual information-disclosure bug, not a missing nice-to-have, and
+  fixing it doesn't require new infrastructure.
+- **Session cookie instead of a token in the query string.** Rejected for
+  this stack: the API is a stateless bearer-token API by design (see the
+  auth section elsewhere in this document); introducing a parallel
+  cookie-based auth path for exactly one endpoint would be more surface
+  area, not less, for equivalent security.
+- **Redis Streams (or a message broker) for durable, replayable event
+  history.** This is the *architecturally correct* answer at a larger
+  scale, or the moment the API runs more than one instance — a
+  process-local ring buffer cannot serve a client whose previous
+  connection landed on a different instance, or survive a restart.
+  Rejected for *now* because this project runs a single API instance and
+  Redis would buy durability the current topology can't take advantage
+  of yet. This is the clearest example in this project of "don't
+  introduce infrastructure a fashionable label" — the in-memory buffer is
+  the right size for the actual deployment, and the upgrade path is
+  named explicitly below rather than pretended away.
+
+### Decision rationale
+Token-on-query-param is the standard, well-understood pattern for
+authenticating a browser WebSocket handshake (it's what the constraint of
+"no custom headers on the handshake request" leaves you with), and it
+reuses the exact same JWT validation code path as every REST route — no
+new auth logic, no new attack surface, no duplicated rules to keep in
+sync. The envelope + ring buffer is the smallest change that turns
+"events might just get missed" into "events might get missed only in
+specific, named, documented circumstances" (buffer wraparound, process
+restart) — which is a materially different and more honest guarantee.
+
+### Consequences
+**Benefits:** the info-disclosure gap is closed; reconnecting clients
+recover from short blips (Wi-Fi drop, tab backgrounded) without a gap in
+the dashboard's live feed; every event has a stable identity useful for
+debugging ("which event was event #4821").
+**Costs:** one extra round trip conceptually (token must be minted before
+the socket opens, which it always was for REST anyway); the ring buffer
+is 200 events of extra memory per process (negligible); token expiry
+mid-connection is not currently handled by force-closing the socket — an
+expired token only blocks *new* connections, not ones already open. That
+last point is a known, accepted gap, not an oversight — see "Future
+evolution."
+
+### Failure model
+- **Client provides no token / an expired or tampered token:** connection
+  is never accepted; closed with code 1008 (policy violation) before
+  joining the broadcast set. No partial/momentary exposure.
+- **Client disconnects and reconnects within the ring buffer's window
+  (last 200 events):** full recovery via `?since=<id>`.
+- **Client reconnects after the buffer has wrapped, or after an API
+  restart:** silently loses events older than the buffer/restart. The
+  client's periodic REST poll of `/dashboard/summary` (already present in
+  `Dashboard.jsx` as a 10s backstop) is what actually bounds staleness in
+  this case — the WS feed is explicitly a latency optimization on top of
+  that poll, not a replacement for it.
+- **API process crashes:** the entire ring buffer and connection set are
+  lost; every connected client falls back to reconnect-with-backoff logic
+  already in `useLiveEvents.js`, and picks up wherever the REST poll
+  backstop leaves off.
+
+### Consistency model
+At-most-once, best-effort delivery, single-process. Not exactly-once —
+nothing here deduplicates if a client somehow processes the same envelope
+twice — and not durable across restarts. This is stated plainly in the
+`websocket_manager.py` module docstring specifically so a future reader
+doesn't infer stronger guarantees than exist.
+
+### Concurrency model
+`WebSocketManager` protects its connection set with an `asyncio.Lock`
+around mutation (`connect`/`disconnect`/pruning dead sockets during
+`broadcast`), so concurrent broadcasts from different request handlers
+can't corrupt the connection set. The ring buffer (`collections.deque`
+with `maxlen`) is only ever mutated from within `broadcast`, which is
+always awaited sequentially per call site — no separate locking needed
+there.
+
+### Scalability implications
+Fine as-is for one API instance and a dashboard-sized number of
+concurrent viewers (tens, not thousands). Does **not** fan out across
+multiple API instances — a client connected to instance A never sees an
+event broadcast by instance B. This was already true before this pass
+and remains an explicit, named limitation (see architecture doc). At
+larger scale, the fix is Redis pub/sub or Streams behind the same
+`broadcast()`/`replay_since()` call sites — the router call sites and the
+frontend hook do not need to change.
+
+### Security implications
+Closes the unauthenticated-observer gap described above. Remaining gap:
+a token that expires *after* a socket is already open is not currently
+force-disconnected — the connection stays live until the client closes
+it or the process restarts. For a system where job payloads could carry
+sensitive data, the next hardening step would be a periodic
+token-freshness check on the server side that closes stale-token
+connections proactively.
+
+### Operational implications
+No new services, no new environment variables, no Docker Compose changes
+— this is a code-only change within the existing `api` container.
+Debugging a "client isn't getting updates" report now has a starting
+point: check the event `id` the client last saw against server logs (the
+WS route logs `connected`/`disconnected` with `user_id`), and check
+whether the gap exceeds the 200-event buffer window.
+
+### Future evolution
+1. Force-close sockets on token expiry rather than only checking at
+   connect time.
+2. Redis pub/sub (multi-instance fan-out) or Redis Streams (durable
+   replay across restarts) once the API runs more than one instance —
+   the point at which the in-memory approach's stated limitations
+   actually start to bite.
+3. Per-organization/per-project event scoping (today every authenticated
+   user sees every event system-wide) if this is ever used by more than
+   one tenant's worth of users concurrently.
+
+---
+
+## 10. Rate limiting: fixing a real bug + a fairness-aware key function
+
+### Decision
+Add `SlowAPIMiddleware` so `Limiter(default_limits=["300/minute"])`
+actually applies to every route, not only routes with an explicit
+`@limiter.limit(...)` decorator. Layer tighter, endpoint-specific limits
+on the highest-risk routes (`/auth/login`, `/auth/register` at
+10/minute; `/workers/claim` at 120/minute; job submission at 60/minute).
+Key rate-limit buckets by authenticated subject (`user:<id>`) when a
+valid bearer token is present, falling back to remote IP only for
+pre-auth endpoints.
+
+### Context
+The Limiter object was constructed with `default_limits=["300/minute"]`
+and wired into the app's exception handler, which *looks* complete —
+`app.state.limiter = limiter` plus the exception handler is the part of
+slowapi's setup most examples show. It is not sufficient on its own:
+slowapi only auto-applies `default_limits` to undecorated routes through
+`SlowAPIMiddleware`. Without that middleware, `default_limits` is
+inert — a genuinely misleading state to ship, since the configuration
+reads as "everything is protected" while only explicitly decorated
+routes were. This was caught during a self-review pass, not by an
+external report, and is worth naming as exactly the kind of gap that
+"the code runs, therefore it works" testing misses — the app started
+fine and every route returned 200s; the failure only shows up if you
+specifically try to exceed a limit on an undecorated route.
+
+### Alternatives considered
+- **Rely on default_limits alone, skip per-route tuning.** Rejected: a
+  flat 300/min is too loose for `/auth/login` (meaningful brute-force
+  budget) and arguably too tight for `/workers/claim` under many
+  concurrent workers polling every second — one flat number can't serve
+  both a public write endpoint and an expected-high-frequency internal
+  polling endpoint well.
+- **IP-only keying (the slowapi default, `get_remote_address`).**
+  Rejected as the sole key: this project's own `docker-compose.yml` runs
+  two worker containers; if they happen to share an egress IP (same
+  Docker network, same host, same NAT in front of a real deployment),
+  IP-keying would let one worker's poll traffic exhaust the budget for
+  another worker's legitimate `/workers/claim` calls. That's a fairness
+  bug, not just an abuse-prevention gap.
+- **Redis-backed distributed limiter storage.** The correct answer once
+  the API runs more than one instance (in-memory counters are
+  per-process, so N instances silently multiply the effective limit).
+  Deferred for the same reason as the WebSocket ring buffer — one API
+  instance today, no benefit yet from paying for Redis.
+
+### Decision rationale
+Keying by authenticated subject when available is a small, local change
+(one function) that meaningfully improves fairness without adding
+infrastructure — it directly targets a fairness failure mode this
+project's own deployment topology (multiple workers) would otherwise hit.
+Tighter limits on `/auth/*` target the specific attack these numbers are
+meant to blunt (credential stuffing, signup spam) rather than applying
+one number uniformly regardless of endpoint risk.
+
+### Consequences
+**Benefits:** the previously-inert default now genuinely protects every
+route; auth endpoints get materially tighter protection than general
+traffic; multiple workers/users sharing infrastructure don't throttle
+each other.
+**Costs:** slightly more code (a custom key function, decoding a JWT on
+every rate-limit check) versus the zero-effort default `get_remote_address`.
+The JWT decode is cheap (local HMAC verification, no DB round trip) so
+this isn't a meaningful performance cost.
+
+### Failure model
+- **Legitimate burst traffic from one authenticated user** (e.g. a
+  dashboard tab plus a worker process sharing one user's token) shares
+  one budget and can be throttled together. Acceptable today; if it
+  becomes a real problem, workers should authenticate with their own
+  service-account-style tokens rather than a human user's token, which
+  the schema already supports (nothing ties a token's subject to "must be
+  a human").
+- **Rate limiter's in-memory storage resets on process restart** — an
+  attacker who times a request around a deploy gets a fresh budget. Low
+  severity for this project's scale; the Redis-backed alternative (noted
+  above) would close this too, at the cost of an external dependency.
+
+### Consistency model
+Approximate, not exact: slowapi's fixed-window counting can allow a burst
+of up to ~2x the configured limit at window boundaries (e.g., a client
+could get `limit` requests in the last second of one window and `limit`
+more in the first second of the next). This is the standard trade-off of
+fixed-window rate limiting and is acceptable for abuse-prevention/fairness
+purposes here; a sliding-window or token-bucket algorithm would tighten
+this at the cost of more state per key, and isn't justified at this
+project's traffic scale.
+
+### Concurrency model
+Each request's limit check-and-increment is handled by slowapi's storage
+backend, which for the in-memory default is safe under FastAPI's
+single-process async concurrency (no separate locking needed on our side).
+This is another place the in-memory-vs-Redis trade-off resurfaces: a
+Redis backend would additionally make the check atomic across processes,
+which in-memory cannot.
+
+### Scalability implications
+As worker count or dashboard-user count grows within a single API
+instance, the subject-keyed limiter scales fine — it's a hash map lookup.
+As API *instance* count grows, the limiter's real behavior silently
+diverges from its configured behavior (see Context / Alternatives above)
+until backed by Redis.
+
+### Security implications
+Directly mitigates credential stuffing on `/auth/login` and signup spam
+on `/auth/register`. Does not mitigate a distributed attack across many
+IPs each making requests under the per-IP threshold — no single-node rate
+limiter can, regardless of backend; that class of attack needs a
+WAF/CDN-level control in front of the API, out of scope for this project.
+
+### Operational implications
+No new services, no new environment variables. A `429` response is
+immediately diagnosable from the response body (slowapi includes the
+matched limit string, e.g. "10 per 1 minute", in the error text) and from
+the existing request-logging middleware, which logs every request's
+status code including 429s.
+
+### Future evolution
+1. Redis-backed storage (`storage_uri="redis://..."`) the moment the API
+   scales beyond one instance — no call-site changes needed elsewhere.
+2. Separate service-account token type for workers, so worker polling
+   traffic and human-user traffic never share a rate-limit budget even
+   when a human happens to be running a worker locally under their own
+   token.
+3. A sliding-window or token-bucket algorithm if the fixed-window
+   boundary-burst behavior ever becomes a practical problem at this
+   project's actual traffic levels (it hasn't yet, by design of the
+   current scale).
