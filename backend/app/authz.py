@@ -11,7 +11,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import OrgMembership, OrgRole, Project, Queue, User
+from .models import OrgMembership, OrgRole, Project, Queue, User
 
 WRITE_ROLES = {OrgRole.OWNER, OrgRole.ADMIN, OrgRole.MEMBER}
 

@@ -3,7 +3,7 @@ from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from app.models import ExecutionStatus, JobStatus, JobType, LogLevel, OrgRole, RetryStrategy, WorkerStatus
+from .models import ExecutionStatus, JobStatus, JobType, LogLevel, OrgRole, RetryStrategy, WorkerStatus
 
 T = TypeVar("T")
 

@@ -21,6 +21,13 @@ client.interceptors.response.use(
   }
 );
 
-export const wsUrl = () => API_BASE.replace(/^http/, "ws") + "/api/v1/dashboard/ws";
+export function wsUrl(sinceId) {
+  const token = localStorage.getItem("token");
+  const base = API_BASE.replace(/^http/, "ws") + "/api/v1/dashboard/ws";
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
+  if (sinceId != null) params.set("since", String(sinceId));
+  return params.toString() ? `${base}?${params}` : base;
+}
 
 export default client;

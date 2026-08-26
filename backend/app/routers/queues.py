@@ -9,6 +9,7 @@ from app.database import get_db
 from app.deps import get_current_user
 from app.models import Job, JobExecution, JobStatus, Queue, RetryPolicy, User
 from app.schemas import QueueCreate, QueueOut, QueueStats, QueueUpdate
+from app.websocket_manager import ws_manager
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/queues", tags=["queues"])
 
@@ -59,6 +60,7 @@ async def pause_queue(project_id: int, queue_id: int, db: AsyncSession = Depends
     queue.is_paused = True
     await db.commit()
     await db.refresh(queue)
+    await ws_manager.broadcast("queue_paused", {"queue_id": queue.id, "queue_name": queue.name})
     return queue
 
 
@@ -68,6 +70,7 @@ async def resume_queue(project_id: int, queue_id: int, db: AsyncSession = Depend
     queue.is_paused = False
     await db.commit()
     await db.refresh(queue)
+    await ws_manager.broadcast("queue_resumed", {"queue_id": queue.id, "queue_name": queue.name})
     return queue
 
 

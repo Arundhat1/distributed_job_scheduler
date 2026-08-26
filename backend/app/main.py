@@ -6,20 +6,19 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
 
-from app.config import get_settings
-from app.database import AsyncSessionLocal, Base, engine
-from app.routers import auth, dashboard, jobs, projects, queues, workers
-from app.services.scheduler_service import run_tick
+from .config import get_settings
+from .database import AsyncSessionLocal, Base, engine
+from .rate_limit import limiter
+from .routers import auth, dashboard, jobs, projects, queues, workers
+from .services.scheduler_service import run_tick
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("scheduler-api")
 settings = get_settings()
-
-limiter = Limiter(key_func=get_remote_address, default_limits=["300/minute"])
 
 
 async def _embedded_scheduler_loop():
@@ -53,6 +52,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Distributed Job Scheduler API", version="1.0.0", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# SlowAPIMiddleware is what actually makes limiter's default_limits apply to
+# every route automatically. Without it, only routes explicitly decorated
+# with @limiter.limit(...) are protected — the decorator alone is not a
+# global policy, just a per-route override on top of one.
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

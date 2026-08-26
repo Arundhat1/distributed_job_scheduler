@@ -7,9 +7,9 @@ export default function Workers() {
   const [workers, setWorkers] = useState([]);
   const [pulses, setPulses] = useState({}); // worker_id -> array of recent tick heights
 
-  const { connected } = useLiveEvents((evt) => {
-    if (evt.type === "jobs_claimed" || evt.type === "job_started") {
-      const wid = evt.worker_id;
+  const { connected } = useLiveEvents((envelope) => {
+    if (envelope.type === "jobs_claimed" || envelope.type === "job_started") {
+      const wid = envelope.data.worker_id;
       setPulses((prev) => {
         const ticks = [...(prev[wid] || Array(20).fill(0.3)), 1];
         return { ...prev, [wid]: ticks.slice(-20) };

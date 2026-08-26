@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     default_job_timeout_seconds: int = 300
     default_max_retries: int = 3
 
+    # --- Worker service auth ---
+    # Shared secret workers present as `Authorization: Bearer <token>` on
+    # every /api/v1/workers/* call (see app/worker_auth.py). Deliberately
+    # has NO usable default (unlike jwt_secret's dev fallback) so a
+    # misconfigured deployment fails closed instead of silently accepting
+    # an empty/guessable worker token.
+    scheduler_token: str = ""
+
     # --- App ---
     environment: str = "development"
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]

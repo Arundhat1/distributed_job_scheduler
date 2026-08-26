@@ -65,15 +65,41 @@ class Worker:
         self.active_jobs = 0
         self.shutting_down = False
         self.in_flight: set[asyncio.Task] = set()
-        self.client = httpx.AsyncClient(base_url=API_BASE, timeout=30)
-    async def register(self):
-        resp = await self.client.post(
-            "/api/v1/workers/register",
-            json={"name": self.name, "hostname": socket.gethostname(), "pid": os.getpid(), "queues": self.queues, "concurrency_limit": self.concurrency},
-        )
-        resp.raise_for_status()
-        self.worker_id = resp.json()["id"]
-        print(f"[{self.name}] registered as worker_id={self.worker_id}, watching queues={self.queues}")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self.client = httpx.AsyncClient(base_url=API_BASE, headers=headers, timeout=30.0)
+
+    async def register(self, max_attempts: int = 10, base_delay: float = 1.0):
+        """
+        Retries registration with exponential backoff instead of crashing
+        the whole process on the first connection blip (DNS not yet
+        ready, API still starting, momentary network drop). Only gives
+        up after max_attempts, at which point the process exits and lets
+        the container's `restart: on-failure` policy take over.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = await self.client.post(
+                    "/api/v1/workers/register",
+                    json={
+                        "name": self.name,
+                        "hostname": socket.gethostname(),
+                        "pid": os.getpid(),
+                        "queues": self.queues,
+                        "concurrency_limit": self.concurrency,
+                    },
+                )
+                resp.raise_for_status()
+                self.worker_id = resp.json()["id"]
+                print(f"[{self.name}] registered as worker_id={self.worker_id}, watching queues={self.queues}")
+                return
+            except Exception as e:
+                last_exc = e
+                delay = min(base_delay * (2 ** (attempt - 1)), 30.0)
+                print(f"[{self.name}] register attempt {attempt}/{max_attempts} failed: {e!r}, retrying in {delay:.1f}s")
+                await asyncio.sleep(delay)
+
+        raise RuntimeError(f"[{self.name}] failed to register after {max_attempts} attempts") from last_exc
 
     async def heartbeat_loop(self):
         while True:

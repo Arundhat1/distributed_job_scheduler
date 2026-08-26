@@ -8,8 +8,8 @@ export default function Dashboard() {
   const [summary, setSummary] = useState(null);
   const [events, setEvents] = useState([]);
 
-  const { connected } = useLiveEvents((evt) => {
-    setEvents((prev) => [{ ...evt, ts: new Date().toLocaleTimeString() }, ...prev].slice(0, 30));
+  const { connected } = useLiveEvents((envelope) => {
+    setEvents((prev) => [{ ...envelope, displayTs: new Date(envelope.ts).toLocaleTimeString() }, ...prev].slice(0, 30));
   });
 
   async function load() {
@@ -54,9 +54,9 @@ export default function Dashboard() {
       <div className="section-title">Live activity</div>
       <div className="card" style={{ maxHeight: 280, overflowY: "auto" }}>
         {events.length === 0 && <div className="empty-state">Waiting for job or worker events…</div>}
-        {events.map((e, i) => (
-          <div key={i} style={{ display: "flex", gap: 12, padding: "6px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
-            <span className="mono">{e.ts}</span>
+        {events.map((e) => (
+          <div key={e.id} style={{ display: "flex", gap: 12, padding: "6px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
+            <span className="mono">{e.displayTs}</span>
             <span>{describeEvent(e)}</span>
           </div>
         ))}
@@ -65,18 +65,23 @@ export default function Dashboard() {
   );
 }
 
-function describeEvent(e) {
-  switch (e.type) {
+function describeEvent(envelope) {
+  const d = envelope.data || {};
+  switch (envelope.type) {
     case "jobs_claimed":
-      return `worker #${e.worker_id} claimed ${e.job_ids?.length} job(s)`;
+      return `worker #${d.worker_id} claimed ${d.job_ids?.length} job(s)`;
     case "job_started":
-      return `job #${e.job_id} started on worker #${e.worker_id}`;
+      return `job #${d.job_id} started on worker #${d.worker_id}`;
     case "job_finished":
-      return `job #${e.job_id} finished → ${e.status}`;
+      return `job #${d.job_id} finished → ${d.status}`;
     case "worker_registered":
-      return `worker "${e.name}" registered`;
+      return `worker "${d.name}" registered`;
+    case "queue_paused":
+      return `queue "${d.queue_name}" paused`;
+    case "queue_resumed":
+      return `queue "${d.queue_name}" resumed`;
     default:
-      return JSON.stringify(e);
+      return JSON.stringify(d);
   }
 }
 
